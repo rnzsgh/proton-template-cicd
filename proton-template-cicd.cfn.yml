@@ -1,0 +1,346 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: CI/CD Pipeline for updating a Proton Template
+
+Parameters:
+
+  TemplateCode:
+    Type: String
+    Description: The unique template code - used in bucket name
+
+  EnvironmentTemplate:
+    Type: String
+    AllowedValues:
+      - true
+      - false
+
+  ApplicationTemplate:
+    Type: String
+    AllowedValues:
+      - true
+      - false
+
+  ProtonPipelineServiceRoleArn:
+    Type: String
+    Description: IAM Role for proton pipeline service
+
+  GitSourceRepo:
+    Type: String
+    Description: GitHub source repository
+
+  GitBranch:
+    Type: String
+    Description: Git repository branch - change triggers a new build
+    Default: main
+
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: "GitHub API token - see: https://github.com/blog/1509-personal-api-tokens"
+
+  GitHubUser:
+    Type: String
+    Description: GitHub username or organization
+
+  CodeBuildDockerImage:
+    Type: String
+    Description: CodeBuild docker image
+    Default: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+
+
+Resources:
+
+  # S3 #########################################################################
+
+  BuildArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub ${TemplateCode}-proton-template-build-artifact-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-in-six-months
+            Status: Enabled
+            ExpirationInDays: 180
+      Tags:
+        - Key: TemplateCode
+          Value: !Ref TemplateCode
+
+  ProtonTemplateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub ${TemplateCode}-proton-template-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: TemplateCode
+          Value: !Ref TemplateCode
+
+  # CodeSuite  #################################################################
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${TemplateCode}-proton-template
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref BuildArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: App
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref GitHubUser
+                Repo: !Ref GitSourceRepo
+                Branch: !Ref GitBranch
+                OAuthToken: !Ref GitHubToken
+              OutputArtifacts:
+                - Name: App
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: App
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+      Tags:
+        - Key: TemplateCode
+          Value: !Ref TemplateCode
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${TemplateCode}-proton-template
+      ServiceRole: !Ref CodeBuildRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          ---
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - printenv
+                - aws s3 cp s3://aws-proton-preview-public-files/model/proton-2020-07-20.normal.json .
+                - aws s3 cp s3://aws-proton-preview-public-files/model/waiters2.json .
+                - aws configure add-model --service-model file://proton-2020-07-20.normal.json --service-name proton-preview
+                - mv waiters2.json ~/.aws/models/proton-preview/2020-07-20/waiters-2.json
+                - rm proton-2020-07-20.normal.json
+            pre_build:
+                commands:
+                - |
+                  aws proton-preview \
+                  --endpoint-url https://proton.${AWS_REGION}.amazonaws.com \
+                  --region ${AWS_REGION} \
+                  update-account-roles \
+                  --account-role-details "pipelineServiceRoleArn=${PROTON_PIPELINE_SERVICE_ROLE_ARN}"
+            build:
+              commands:
+                - printenv
+            post_build:
+              commands:
+                - printenv
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: !Ref CodeBuildDockerImage
+        EnvironmentVariables:
+          - Name: TEMPLATE_CODE
+            Value: !Ref TemplateCode
+          - Name: TEMPLATE_BUCKET_NAME
+            Value: !Ref ProtonTemplateBucket
+          - Name: PROTON_PIPELINE_SERVICE_ROLE_ARN
+            Value: !Ref ProtonPipelineServiceRoleArn
+          - Name: IS_ENVIRONMENT
+            Value: !Ref EnvironmentTemplate
+          - Name: IS_APPLICATION
+            Value: !Ref ApplicationTemplate
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref CodeBuildLogGroup
+      Tags:
+        - Key: TemplateCode
+          Value: !Ref TemplateCode
+
+  # IAM ########################################################################
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${TemplateCode}-codebuild-proton-template
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref CodeBuildPolicy
+      Tags:
+        - Key: TemplateCode
+          Value: !Ref TemplateCode
+
+  CodeBuildPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${TemplateCode}-codebuild-proton-template
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+              - dynamodb:PutItem
+            Resource: !GetAtt TemplateVersionDynamoDbTable.Arn
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:GetObjectVersion
+            Resource: !Sub ${BuildArtifactBucket.Arn}/*
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:GetObjectVersion
+            Resource: !Sub ${ProtonTemplateBucket.Arn}/*
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !Ref ProtonPipelineServiceRoleArn
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub arn:aws:s3:::aws-proton-preview-public-files/*
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !GetAtt CodeBuildLogGroup.Arn
+          - Effect: Allow
+            Action:
+              - proton:*
+            Resource: '*' # These are not clearly defined right now
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${TemplateCode}-codepipeline-proton-template
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref CodePipelinePolicy
+      Tags:
+        - Key: TemplateCode
+          Value: !Ref TemplateCode
+
+  CodePipelinePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${TemplateCode}-codepipeline-proton-template
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - codebuild:StartBuild
+              - codebuild:BatchGetBuilds
+            Resource: !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${TemplateCode}-proton-template
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${TemplateCode}-codebuild-proton-template
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetBucketVersioning
+            Resource: !Sub ${BuildArtifactBucket.Arn}/*
+
+  # CloudWatch Logs ############################################################
+
+  CodeBuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /${TemplateCode}/proton-template/codebuild
+      RetentionInDays: 180
+
+  # DynamoDB ###################################################################
+
+  TemplateVersionDynamoDbTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: !Sub ${TemplateCode}-proton-template-version
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: id # template code
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        SSESpecification:
+            SSEType: KMS
+            SSEEnabled: true
+        Tags:
+          - Key: TemplateCode
+            Value: !Ref TemplateCode
+
+
+Outputs:
+
+  Name:
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
