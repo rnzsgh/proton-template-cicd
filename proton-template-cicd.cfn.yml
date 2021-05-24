@@ -9,6 +9,15 @@ Parameters:
     Type: String
     Description: The unique template code - used in bucket name
 
+  EnvCode:
+    Type: String
+    Description: The environment code
+
+  AppCode:
+    Type: String
+    Default: ProtonTemplateCiCd
+    Description: The environment code
+
   EnvironmentTemplate:
     Type: String
     AllowedValues:
@@ -75,14 +84,16 @@ Resources:
             Status: Enabled
             ExpirationInDays: 180
       Tags:
-        - Key: TemplateCode
-          Value: !Ref TemplateCode
+        - Key: EnvCode
+          Value: !Ref EnvCode
+        - Key: AppCode
+          Value: !Ref AppCode
 
-  ProtonTemplateBucket:
+  ProtonTemplatesBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Delete
     Properties:
-      BucketName: !Sub ${TemplateCode}-proton-template-${AWS::AccountId}-${AWS::Region}
+      BucketName: !Sub proton-templates-${AWS::AccountId}-${AWS::Region}
       VersioningConfiguration:
         Status: Enabled
       PublicAccessBlockConfiguration:
@@ -95,8 +106,10 @@ Resources:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
       Tags:
-        - Key: TemplateCode
-          Value: !Ref TemplateCode
+        - Key: EnvCode
+          Value: !Ref EnvCode
+        - Key: AppCode
+          Value: !Ref AppCode
 
   # CodeSuite  #################################################################
 
@@ -186,8 +199,8 @@ Resources:
         EnvironmentVariables:
           - Name: TEMPLATE_CODE
             Value: !Ref TemplateCode
-          - Name: TEMPLATE_BUCKET_NAME
-            Value: !Ref ProtonTemplateBucket
+          - Name: PROTON_TEMPLATES_BUCKET_NAME
+            Value: !Ref ProtonTemplatesBucket
           - Name: PROTON_PIPELINE_SERVICE_ROLE_ARN
             Value: !Ref ProtonPipelineServiceRoleArn
           - Name: IS_ENVIRONMENT
@@ -203,6 +216,26 @@ Resources:
           Value: !Ref TemplateCode
 
   # IAM ########################################################################
+
+  ProtonPipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub proton-pipeline-service-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: proton.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      Tags:
+        - Key: TemplateCode
+          Value: !Ref TemplateCode
+
+
 
   CodeBuildRole:
     Type: AWS::IAM::Role
@@ -246,7 +279,7 @@ Resources:
               - s3:GetObject
               - s3:PutObject
               - s3:GetObjectVersion
-            Resource: !Sub ${ProtonTemplateBucket.Arn}/*
+            Resource: !Sub ${ProtonTemplatesBucket.Arn}/*
           - Effect: Allow
             Action: iam:PassRole
             Resource: !Ref ProtonPipelineServiceRoleArn
