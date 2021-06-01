@@ -1,0 +1,36 @@
+[
+  {
+    "ParameterKey": "EnvCode",
+    "ParameterValue": "dev"
+  },{
+    "ParameterKey": "AppCode",
+    "ParameterValue": "dev"
+  },{
+    "ParameterKey": "TemplateCode",
+    "ParameterValue": "dev"
+  },{
+    "ParameterKey": "ApplicationTemplate",
+    "ParameterValue": "DevApp"
+  },{
+    "ParameterKey": "EnvironmentTemplate",
+    "ParameterValue": "DevEnv"
+  },{
+    "ParameterKey": "GitHubUser",
+    "ParameterValue": "frgud"
+  },{
+    "ParameterKey": "GitSourceRepo",
+    "ParameterValue": ""
+  },{
+    "ParameterKey": "GitBranch",
+    "ParameterValue": "main"
+  },{
+    "ParameterKey": "CodeBuildDockerImage",
+    "ParameterValue": "aws/codebuild/amazonlinux2-x86_64-standard:3.0"
+  },{
+    "ParameterKey": "ProtonPipelineServiceRoleArn",
+    "ParameterValue": ""
+  },{
+    "ParameterKey": "GitHubToken",
+    "ParameterValue": ""
+  }
+]
