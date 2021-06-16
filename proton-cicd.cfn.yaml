@@ -5,19 +5,31 @@ Description: CI/CD Pipeline for updating a Proton Template
 
 Parameters:
 
+  TemplateCode:
+    Type: String
+    Description: The unique template code - used in bucket name
+
   EnvCode:
     Type: String
     Description: The environment code
 
   AppCode:
     Type: String
-    Default: ProtonTemplateCiCd
     Description: The environment code
 
-  # Update this in the parent stack to trigger nested stack updates
-  Version:
+  TemplateType:
     Type: String
-    Description: Version to trigger nested stack update
+    AllowedValues:
+      - environment
+      - application
+  
+  ProtonTemplatesBucketARN:
+    Type: String
+    Description: Proton Templates Bucket ARN
+
+  BuildArtifactBucketARN:
+    Type: String
+    Description: Proton Build Artifacts Bucket ARN
 
   ProtonPipelineServiceRoleArn:
     Type: String
@@ -30,7 +42,6 @@ Parameters:
   GitBranch:
     Type: String
     Description: Git repository branch - change triggers a new build
-proton-template-cicd-test-env.json
     Default: main
 
   GitHubToken:
@@ -47,82 +58,21 @@ proton-template-cicd-test-env.json
     Description: CodeBuild docker image
     Default: aws/codebuild/amazonlinux2-x86_64-standard:3.0
 
+Conditions :
+  IsEnvironment : !Equals [!Ref TemplateType, environment]
 
 Resources:
-
-  # S3 #########################################################################
-
-  BuildArtifactBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Delete
-    Properties:
-      BucketName: !Sub proton-template-cicd-build-artifact-${AWS::AccountId}-${AWS::Region}-${AppCode}-${EnvCode}
-      VersioningConfiguration:
-        Status: Enabled
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      LifecycleConfiguration:
-        Rules:
-          - Id: expire-in-six-months
-            Status: Enabled
-            ExpirationInDays: 180
-      Tags:
-        - Key: EnvCode
-          Value: !Ref EnvCode
-        - Key: AppCode
-          Value: !Ref AppCode
-
-  ProtonTemplatesBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Delete
-    Properties:
-      BucketName: !Sub proton-templates-${AWS::AccountId}-${AWS::Region}-${AppCode}-${EnvCode}
-      VersioningConfiguration:
-        Status: Enabled
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      Tags:
-        - Key: EnvCode
-          Value: !Ref EnvCode
-        - Key: AppCode
-          Value: !Ref AppCode
-
-  # CodeSuite  #################################################################
-
-
-  CodeStarGitHubConnection:
-    Type: AWS::CodeStarConnections::Connection
-    Properties:
-      ConnectionName: !Sub proton-github-connection-${AppCode}-${EnvCode}
-      ProviderType: GitHub
-      Tags:
-        - Key: EnvCode
-          Value: !Ref EnvCode
-        - Key: AppCode
-          Value: !Ref AppCode
-
   CodePipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
-      Name: !Sub ${TemplateCode}-proton-template
+      Name: !If [ IsEnvironment,
+          !Join [ "-", [ !Ref TemplateCode, !Ref EnvCode, env, proton, template ] ],
+          !Join [ "-", [ !Ref TemplateCode, !Ref AppCode, app, proton, template ] ],
+        ]
       RoleArn: !GetAtt CodePipelineRole.Arn
       ArtifactStore:
         Type: S3
-        Location: !Ref BuildArtifactBucket
+        Location: !Select [ 5, !Split [ ':', !Ref BuildArtifactBucketARN ] ]
       Stages:
         - Name: Source
           Actions:
@@ -162,7 +112,10 @@ Resources:
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
     Properties:
-      Name: !Sub ${TemplateCode}-proton-template
+      Name: !If [IsEnvironment,
+          !Join [ "-", [!Ref TemplateCode, !Ref EnvCode, env, proton, template] ],
+          !Join [ "-", [!Ref TemplateCode, !Ref AppCode, app, proton, template] ],
+        ]
       ServiceRole: !Ref CodeBuildRole
       Artifacts:
         Type: CODEPIPELINE
@@ -182,15 +135,16 @@ Resources:
                 - rm proton-2020-07-20.normal.json
             pre_build:
                 commands:
-                - |
-                  aws proton-preview \
-                  --endpoint-url https://proton.${AWS_REGION}.amazonaws.com \
-                  --region ${AWS_REGION} \
-                  update-account-roles \
-                  --account-role-details "pipelineServiceRoleArn=${PROTON_PIPELINE_SERVICE_ROLE_ARN}"
+                - if [[ $TEMPLATE_TYPE == "environment" ]]; then echo -e "DEPLOYING AN ENVIRONMENT TEMPLATE"; fi
+                - if [[ $TEMPLATE_TYPE == "application" ]]; then echo -e "DEPLOYING AN APPLICATION TEMPLATE"; fi
             build:
               commands:
-                - printenv
+                - if [[ $TEMPLATE_TYPE == "environment" ]]; then
+                    aws proton-preview create-environment-template --endpoint-url https://proton.${AWS_REGION}.amazonaws.com --region ${AWS_REGION} --name ${TEMPLATE_CODE}-${ENVIRONMENT_CODE} --display-name ${TEMPLATE_CODE}-${ENVIRONMENT_CODE}; 
+                  fi
+                - if [[ $TEMPLATE_TYPE == "application" ]]; then
+                    aws proton-preview create-service-template --endpoint-url https://proton.${AWS_REGION}.amazonaws.com --region ${AWS_REGION} --name ${TEMPLATE_CODE}-${APPLICATION_CODE} --display-name ${TEMPLATE_CODE}-${APPLICATION_CODE};
+                  fi
             post_build:
               commands:
                 - printenv
@@ -202,13 +156,15 @@ Resources:
           - Name: TEMPLATE_CODE
             Value: !Ref TemplateCode
           - Name: PROTON_TEMPLATES_BUCKET_NAME
-            Value: !Ref ProtonTemplatesBucket
+            Value: !Ref ProtonTemplatesBucketARN
           - Name: PROTON_PIPELINE_SERVICE_ROLE_ARN
             Value: !Ref ProtonPipelineServiceRoleArn
-          - Name: IS_ENVIRONMENT
-            Value: !Ref EnvironmentTemplate
-          - Name: IS_APPLICATION
-            Value: !Ref ApplicationTemplate
+          - Name: TEMPLATE_TYPE
+            Value: !Ref TemplateType
+          - Name: ENVIRONMENT_CODE
+            Value: !Ref EnvCode
+          - Name: APPLICATION_CODE
+            Value: !Ref AppCode
       LogsConfig:
         CloudWatchLogs:
           Status: ENABLED
@@ -217,32 +173,13 @@ Resources:
         - Key: TemplateCode
           Value: !Ref TemplateCode
 
-  # IAM ########################################################################
-
-  ProtonPipelineServiceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub proton-pipeline-service-role
-      Path: /
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: proton.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AdministratorAccess
-      Tags:
-        - Key: TemplateCode
-          Value: !Ref TemplateCode
-
-
-
   CodeBuildRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${TemplateCode}-codebuild-proton-template
+      RoleName: !If [ IsEnvironment,
+          !Join [ "-", [ !Ref TemplateCode, !Ref EnvCode, env, proton, template, codebuild, role ] ],
+          !Join [ "-", [ !Ref TemplateCode, !Ref AppCode, app, proton, template, codebuild, role ] ],
+        ]
       Path: /
       AssumeRolePolicyDocument:
         Version: 2012-10-17
@@ -260,7 +197,10 @@ Resources:
   CodeBuildPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      ManagedPolicyName: !Sub ${TemplateCode}-codebuild-proton-template
+      ManagedPolicyName: !If [ IsEnvironment,
+          !Join [ "-", [ !Ref TemplateCode, !Ref EnvCode, env, proton, template, policy ] ],
+          !Join [ "-", [ !Ref TemplateCode, !Ref AppCode, app, proton, template, policy ] ],
+        ]
       PolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -275,13 +215,13 @@ Resources:
               - s3:GetObject
               - s3:PutObject
               - s3:GetObjectVersion
-            Resource: !Sub ${BuildArtifactBucket.Arn}/*
+            Resource: !Sub ${BuildArtifactBucketARN}/*
           - Effect: Allow
             Action:
               - s3:GetObject
               - s3:PutObject
               - s3:GetObjectVersion
-            Resource: !Sub ${ProtonTemplatesBucket.Arn}/*
+            Resource: !Sub ${ProtonTemplatesBucketARN}/*
           - Effect: Allow
             Action: iam:PassRole
             Resource: !Ref ProtonPipelineServiceRoleArn
@@ -303,7 +243,10 @@ Resources:
   CodePipelineRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${TemplateCode}-codepipeline-proton-template
+      RoleName: !If [ IsEnvironment,
+          !Join [ "-", [ !Ref TemplateCode, !Ref EnvCode, env, proton, template, codepipeline, role ] ],
+          !Join [ "-", [ !Ref TemplateCode, !Ref AppCode, app, proton, template, codepipeline, role ] ],
+        ]
       Path: /
       AssumeRolePolicyDocument:
         Version: 2012-10-17
@@ -321,7 +264,10 @@ Resources:
   CodePipelinePolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      ManagedPolicyName: !Sub ${TemplateCode}-codepipeline-proton-template
+      ManagedPolicyName: !If [ IsEnvironment,
+          !Join [ "-", [ !Ref TemplateCode, !Ref EnvCode, env, proton, template ] ],
+          !Join [ "-", [ !Ref TemplateCode, !Ref AppCode, app, proton, template ] ],
+        ]
       PolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -329,7 +275,7 @@ Resources:
             Action:
               - codebuild:StartBuild
               - codebuild:BatchGetBuilds
-            Resource: !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${TemplateCode}-proton-template
+            Resource: !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${TemplateCode}-*-proton-template
           - Effect: Allow
             Action: iam:PassRole
             Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${TemplateCode}-codebuild-proton-template
@@ -339,22 +285,24 @@ Resources:
               - s3:GetObject
               - s3:GetObjectVersion
               - s3:GetBucketVersioning
-            Resource: !Sub ${BuildArtifactBucket.Arn}/*
-
-  # CloudWatch Logs ############################################################
+            Resource: !Sub ${BuildArtifactBucketARN}/*
 
   CodeBuildLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /${TemplateCode}/proton-template/codebuild
+      LogGroupName: !If [ IsEnvironment,
+          !Join [ "/", [ !Ref TemplateCode, !Ref EnvCode, env, proton-templates, CodeBuildRole ] ],
+          !Join [ "/", [ !Ref TemplateCode, !Ref AppCode, app, proton-templates, CodeBuildRole ] ],
+        ]
       RetentionInDays: 180
-
-  # DynamoDB ###################################################################
 
   TemplateVersionDynamoDbTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: !Sub ${TemplateCode}-proton-template-version
+        TableName: !If [ IsEnvironment,
+          !Join [ "-", [ !Ref TemplateCode, !Ref EnvCode, env, proton, template, version ] ],
+          !Join [ "-", [ !Ref TemplateCode, !Ref AppCode, app, proton, template, version ] ],
+        ]
         BillingMode: PAY_PER_REQUEST
         PointInTimeRecoverySpecification:
           PointInTimeRecoveryEnabled: true
@@ -371,11 +319,8 @@ Resources:
           - Key: TemplateCode
             Value: !Ref TemplateCode
 
-
 Outputs:
-
   Name:
     Value: !Ref AWS::StackName
     Export:
-      Name: !Sub ${AWS::StackName}-Name
-
+      Name: !Sub ${AWS::StackName}-Name 
